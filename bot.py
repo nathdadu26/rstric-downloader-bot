@@ -28,6 +28,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID"))
 TARGET_CHANNEL = int(os.getenv("TARGET_CHANNEL"))
 PORT = int(os.getenv("PORT", 8000))
+UPLOAD_DELAY = int(os.getenv("UPLOAD_DELAY", 3))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 DATABASE_FILE = "monitoring_channels.json"
 TEMP_DIR = "temp_media"
 
@@ -114,9 +116,9 @@ async def get_message_ids(link: str) -> tuple:
     
     return None, "Invalid link format", None
 
-# ==================== DOWNLOAD AND UPLOAD ====================
+# ==================== DOWNLOAD AND UPLOAD (FIXED) ====================
 async def download_and_upload_media(source_chat_id: int, msg_id: int, temp_dir: str) -> bool:
-    """Download media from source, upload to target, delete temp"""
+    """Download media from source, upload to target, delete temp - FIXED VERSION"""
     temp_file = None
     try:
         # Get message
@@ -125,35 +127,68 @@ async def download_and_upload_media(source_chat_id: int, msg_id: int, temp_dir: 
         if not msg or not msg.media:
             return False
         
-        # Generate temp file path
+        # Skip unsupported media types
+        if isinstance(msg.media, (MessageMediaWebPage, MessageMediaUnsupported)):
+            return False
+        
+        # Generate temp file path with proper extension
         timestamp = int(time.time() * 1000)
-        temp_file = os.path.join(temp_dir, f"media_{msg_id}_{timestamp}.tmp")
+        
+        # Determine file extension based on media type
+        if msg.photo:
+            ext = ".jpg"
+        elif msg.video:
+            ext = ".mp4"
+        elif msg.document:
+            # Try to get extension from document
+            if hasattr(msg.document, 'attributes'):
+                for attr in msg.document.attributes:
+                    if hasattr(attr, 'file_name') and attr.file_name:
+                        ext = os.path.splitext(attr.file_name)[1] or ".bin"
+                        break
+                else:
+                    ext = ".bin"
+            else:
+                ext = ".bin"
+        else:
+            ext = ".bin"
+        
+        temp_file = os.path.join(temp_dir, f"media_{msg_id}_{timestamp}{ext}")
         
         # Download
         print(f"  📥 Downloading #{msg_id}...")
-        await userbot.download_media(msg.media, file=temp_file)
+        downloaded_path = await userbot.download_media(msg.media, file=temp_file)
         
-        if not os.path.exists(temp_file):
+        if not downloaded_path or not os.path.exists(downloaded_path):
             print(f"  ❌ Download failed - file not created")
             return False
         
-        # Upload from file path (not media object)
+        # Get caption if exists
+        caption = msg.message if msg.message else ""
+        
+        # Upload as a fresh file (not forwarding)
         print(f"  📤 Uploading #{msg_id}...")
         await userbot.send_file(
             TARGET_CHANNEL,
-            temp_file,
-            caption=""
+            downloaded_path,
+            caption=caption,
+            force_document=False  # Send as media type (photo/video) not document
         )
         
+        print(f"  ✅ Successfully uploaded #{msg_id}")
+        
         # Delete temp file
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+        if os.path.exists(downloaded_path):
+            os.remove(downloaded_path)
             print(f"  🗑️  Deleted temp file")
         
         return True
         
+    except FloodWaitError as e:
+        # Re-raise FloodWaitError to be handled by caller
+        raise
     except Exception as e:
-        print(f"  ❌ Error: {e}")
+        print(f"  ❌ Error processing #{msg_id}: {e}")
         # Cleanup on error
         if temp_file and os.path.exists(temp_file):
             try:
@@ -162,15 +197,16 @@ async def download_and_upload_media(source_chat_id: int, msg_id: int, temp_dir: 
                 pass
         return False
 
-# ==================== DOWNLOAD-UPLOAD RANGE ====================
+# ==================== DOWNLOAD-UPLOAD RANGE (IMPROVED) ====================
 async def download_upload_range(chat_id: int, chat_name: str, start_id: int, end_id: int, status_msg):
-    """Download & upload media from start_id to end_id"""
+    """Download & upload media from start_id to end_id with retry logic"""
     
     if start_id > end_id:
         start_id, end_id = end_id, start_id
     
     total_uploaded = 0
     total_skipped = 0
+    total_failed = 0
     message_id = start_id
     
     await status_msg.edit_text(
@@ -203,15 +239,37 @@ async def download_upload_range(chat_id: int, chat_name: str, start_id: int, end
             
             # Check media type
             if msg.photo or msg.document or msg.video:
-                # Download and upload
-                success = await download_and_upload_media(chat_id, message_id, TEMP_DIR)
+                # Retry logic for uploads
+                retry_count = 0
+                success = False
                 
-                if success:
-                    total_uploaded += 1
-                    print(f"✅ Uploaded #{message_id}")
-                else:
-                    total_skipped += 1
-                    print(f"⚠️ Skipped #{message_id}")
+                while retry_count < MAX_RETRIES and not success:
+                    try:
+                        success = await download_and_upload_media(chat_id, message_id, TEMP_DIR)
+                        
+                        if success:
+                            total_uploaded += 1
+                            print(f"✅ Uploaded #{message_id}")
+                        else:
+                            retry_count += 1
+                            if retry_count < MAX_RETRIES:
+                                print(f"⚠️ Retry {retry_count}/{MAX_RETRIES} for #{message_id}")
+                                await asyncio.sleep(2)
+                            else:
+                                total_failed += 1
+                                print(f"❌ Failed after {MAX_RETRIES} retries: #{message_id}")
+                    
+                    except FloodWaitError as e:
+                        # Don't count flood wait as a retry
+                        print(f"⏳ FloodWait {e.seconds}s at #{message_id}")
+                        await status_msg.edit_text(
+                            f"⏳ **Telegram Rate Limited**\n"
+                            f"⏰ Waiting {e.seconds} seconds...\n\n"
+                            f"✅ Uploaded: {total_uploaded}\n"
+                            f"📍 Current: #{message_id}/{end_id}"
+                        )
+                        await asyncio.sleep(e.seconds)
+                        print(f"✅ Resuming after FloodWait...")
             else:
                 total_skipped += 1
             
@@ -222,13 +280,15 @@ async def download_upload_range(chat_id: int, chat_name: str, start_id: int, end
                         f"⏳ **Processing...**\n"
                         f"📢 {chat_name}\n"
                         f"📍 Current: #{message_id}/{end_id}\n"
-                        f"✅ Uploaded: {total_uploaded}"
+                        f"✅ Uploaded: {total_uploaded}\n"
+                        f"⏭️ Skipped: {total_skipped}\n"
+                        f"❌ Failed: {total_failed}"
                     )
                 except:
                     pass
             
-            # Telegram ToS delay
-            await asyncio.sleep(5)
+            # Delay between uploads to respect Telegram ToS
+            await asyncio.sleep(UPLOAD_DELAY)
             message_id += 1
             
         except FloodWaitError as e:
@@ -243,7 +303,7 @@ async def download_upload_range(chat_id: int, chat_name: str, start_id: int, end
             print(f"✅ Resuming...")
             
         except Exception as e:
-            print(f"❌ Error at #{message_id}: {e}")
+            print(f"❌ Unexpected error at #{message_id}: {e}")
             message_id += 1
             total_skipped += 1
     
@@ -252,6 +312,7 @@ async def download_upload_range(chat_id: int, chat_name: str, start_id: int, end
         f"📢 {chat_name}\n"
         f"✅ Uploaded: {total_uploaded}\n"
         f"⏭️ Skipped: {total_skipped}\n"
+        f"❌ Failed: {total_failed}\n"
         f"📍 Range: #{start_id} → #{end_id}"
     )
     
@@ -290,22 +351,35 @@ async def monitor_channel_for_new_media(chat_id: int, chat_name: str, last_msg_i
                             if msg and msg.media:
                                 if not isinstance(msg.media, (MessageMediaWebPage, MessageMediaUnsupported)):
                                     if msg.photo or msg.document or msg.video:
-                                        # Download and upload
-                                        success = await download_and_upload_media(chat_id, msg_id, TEMP_DIR)
+                                        # Retry logic for monitoring
+                                        retry_count = 0
+                                        success = False
                                         
-                                        if success:
-                                            media_type = '📷' if msg.photo else '📄' if msg.document else '🎬'
-                                            print(f"🚀 NEW MEDIA! #{msg_id} {media_type}")
-                                            new_count += 1
+                                        while retry_count < MAX_RETRIES and not success:
+                                            try:
+                                                success = await download_and_upload_media(chat_id, msg_id, TEMP_DIR)
+                                                
+                                                if success:
+                                                    media_type = '📷' if msg.photo else '📄' if msg.document else '🎬'
+                                                    print(f"🚀 NEW MEDIA! #{msg_id} {media_type}")
+                                                    new_count += 1
+                                                else:
+                                                    retry_count += 1
+                                                    if retry_count < MAX_RETRIES:
+                                                        await asyncio.sleep(2)
+                                            
+                                            except FloodWaitError as e:
+                                                print(f"⏳ FloodWait {e.seconds}s...")
+                                                await asyncio.sleep(e.seconds)
                                         
-                                        # 2 second delay
+                                        # 2 second delay between uploads in monitoring
                                         await asyncio.sleep(2)
                         
                         except FloodWaitError as e:
                             print(f"⏳ FloodWait {e.seconds}s...")
                             await asyncio.sleep(e.seconds)
                         except Exception as e:
-                            print(f"❌ Error #{msg_id}: {e}")
+                            print(f"❌ Monitor error #{msg_id}: {e}")
                     
                     current_last_id = latest_msg_id
                     
@@ -339,7 +413,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Restricted channels\n"
         "✅ Protected chats\n"
         "✅ Normal channels\n"
-        "✅ Private groups"
+        "✅ Private groups\n\n"
+        f"⚙️ **Settings:**\n"
+        f"Upload delay: {UPLOAD_DELAY}s\n"
+        f"Max retries: {MAX_RETRIES}"
     )
 
 async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -498,6 +575,10 @@ async def restore_monitoring():
 
 # ==================== MAIN ====================
 async def main():
+    print("🚀 Starting bot...")
+    print(f"⚙️  Upload delay: {UPLOAD_DELAY}s")
+    print(f"⚙️  Max retries: {MAX_RETRIES}")
+    
     await start_health_server()
     await start_userbot()
     await restore_monitoring()
@@ -508,7 +589,7 @@ async def main():
     app.add_handler(CommandHandler("channels", channels_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    print("✅ Bot started!")
+    print("✅ Bot started - Ready to download & upload!")
     
     await app.initialize()
     await app.start()
@@ -518,9 +599,12 @@ async def main():
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
+        print("\n⚠️  Shutting down...")
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
+        await userbot.disconnect()
+        print("✅ Bot stopped")
 
 if __name__ == "__main__":
     asyncio.run(main())
