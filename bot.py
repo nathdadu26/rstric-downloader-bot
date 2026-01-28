@@ -198,74 +198,55 @@ async def download_upload_range(chat_id: int, chat_name: str, start_id: int, end
                 total_skipped += 1
                 continue
             
-            if msg.noforwards:
-                # Restricted - download & upload instead
-                if msg.photo or msg.document or msg.video:
-                    temp_file = os.path.join(TEMP_DIR, f"media_{message_id}_{int(asyncio.get_event_loop().time())}")
+            # Download & Upload for ALL messages (works with protected chats)
+            if msg.photo or msg.document or msg.video:
+                temp_file = os.path.join(TEMP_DIR, f"media_{message_id}_{int(asyncio.get_event_loop().time())}")
+                
+                try:
+                    # Download
+                    await status_msg.edit_text(
+                        f"📥 **Downloading...**\n"
+                        f"📢 {chat_name}\n"
+                        f"📍 Current: #{message_id}/{end_id}\n"
+                        f"✅ Uploaded: {total_uploaded}\n"
+                        f"Message ID: {message_id}"
+                    )
                     
-                    try:
-                        # Download
-                        await status_msg.edit_text(
-                            f"📥 **Downloading...**\n"
-                            f"📢 {chat_name}\n"
-                            f"📍 Current: #{message_id}/{end_id}\n"
-                            f"✅ Uploaded: {total_uploaded}\n"
-                            f"Message ID: {message_id}"
-                        )
-                        
-                        msg_download = await userbot.get_messages(chat_id, ids=message_id)
-                        await userbot.download_media(msg_download.media, file=temp_file)
-                        
-                        # Upload
-                        await status_msg.edit_text(
-                            f"📤 **Uploading...**\n"
-                            f"📢 {chat_name}\n"
-                            f"📍 Current: #{message_id}/{end_id}\n"
-                            f"✅ Uploaded: {total_uploaded}\n"
-                            f"Message ID: {message_id}"
-                        )
-                        
-                        await userbot.send_file(
-                            TARGET_CHANNEL,
-                            temp_file,
-                            caption=""
-                        )
-                        
-                        # Delete temp file
-                        if os.path.exists(temp_file):
+                    msg_download = await userbot.get_messages(chat_id, ids=message_id)
+                    await userbot.download_media(msg_download.media, file=temp_file)
+                    
+                    # Upload
+                    await status_msg.edit_text(
+                        f"📤 **Uploading...**\n"
+                        f"📢 {chat_name}\n"
+                        f"📍 Current: #{message_id}/{end_id}\n"
+                        f"✅ Uploaded: {total_uploaded}\n"
+                        f"Message ID: {message_id}"
+                    )
+                    
+                    await userbot.send_file(
+                        TARGET_CHANNEL,
+                        temp_file,
+                        caption=""
+                    )
+                    
+                    # Delete temp file
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                    
+                    total_uploaded += 1
+                    print(f"✅ Downloaded & Uploaded #{message_id}")
+                    
+                except Exception as e:
+                    print(f"⚠️ Download-Upload failed #{message_id}: {e}")
+                    if os.path.exists(temp_file):
+                        try:
                             os.remove(temp_file)
-                        
-                        total_uploaded += 1
-                        print(f"✅ Downloaded & Uploaded #{message_id}")
-                        
-                    except Exception as e:
-                        print(f"⚠️ Download-Upload failed #{message_id}: {e}")
-                        if os.path.exists(temp_file):
-                            try:
-                                os.remove(temp_file)
-                            except:
-                                pass
-                        total_skipped += 1
-                else:
+                        except:
+                            pass
                     total_skipped += 1
             else:
-                # Not restricted - normal download & upload for consistency
-                if msg.photo or msg.document or msg.video:
-                    temp_file = os.path.join(TEMP_DIR, f"media_{message_id}_{int(asyncio.get_event_loop().time())}")
-                    
-                    try:
-                        await userbot.send_file(
-                            TARGET_CHANNEL,
-                            msg.media,
-                            caption=""
-                        )
-                        total_uploaded += 1
-                        print(f"✅ Uploaded #{message_id}")
-                    except Exception as e:
-                        print(f"⚠️ Upload failed #{message_id}: {e}")
-                        total_skipped += 1
-                else:
-                    total_skipped += 1
+                total_skipped += 1
             
             # Update status every 10 messages
             if message_id % 10 == 0:
@@ -351,36 +332,24 @@ async def monitor_channel_for_new_media(chat_id: int, chat_name: str, last_msg_i
                                     if not isinstance(msg.media, (MessageMediaWebPage, MessageMediaUnsupported)):
                                         if msg.photo or msg.document or msg.video:
                                             
-                                            # Download & Upload
-                                            if msg.noforwards:
-                                                # Restricted - download & upload
-                                                temp_file = os.path.join(TEMP_DIR, f"new_media_{msg_id}_{int(asyncio.get_event_loop().time())}")
-                                                try:
-                                                    await userbot.download_media(msg.media, file=temp_file)
-                                                    await userbot.send_file(
-                                                        TARGET_CHANNEL,
-                                                        temp_file,
-                                                        caption=""
-                                                    )
-                                                    if os.path.exists(temp_file):
+                                            # Download & Upload for ALL messages
+                                            temp_file = os.path.join(TEMP_DIR, f"new_media_{msg_id}_{int(asyncio.get_event_loop().time())}")
+                                            try:
+                                                await userbot.download_media(msg.media, file=temp_file)
+                                                await userbot.send_file(
+                                                    TARGET_CHANNEL,
+                                                    temp_file,
+                                                    caption=""
+                                                )
+                                                if os.path.exists(temp_file):
+                                                    os.remove(temp_file)
+                                            except Exception as e:
+                                                print(f"❌ Failed new media #{msg_id}: {e}")
+                                                if os.path.exists(temp_file):
+                                                    try:
                                                         os.remove(temp_file)
-                                                except Exception as e:
-                                                    print(f"❌ Failed new media #{msg_id}: {e}")
-                                                    if os.path.exists(temp_file):
-                                                        try:
-                                                            os.remove(temp_file)
-                                                        except:
-                                                            pass
-                                            else:
-                                                # Not restricted - direct upload
-                                                try:
-                                                    await userbot.send_file(
-                                                        TARGET_CHANNEL,
-                                                        msg.media,
-                                                        caption=""
-                                                    )
-                                                except Exception as e:
-                                                    print(f"❌ Failed new media #{msg_id}: {e}")
+                                                    except:
+                                                        pass
                                             
                                             media_type = '📷' if msg.photo else '📄' if msg.document else '🎬'
                                             print(f"🚀 NEW MEDIA PROCESSED! #{msg_id} {media_type} from {chat_name}")
